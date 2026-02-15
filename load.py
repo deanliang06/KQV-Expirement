@@ -12,5 +12,7 @@ if __name__ == "__main__":
 
     for layer in model.encoder.layer:
         for param in layer.attention.self.query.parameters():
-            print(auto_encoder(param))
+            newLayer = auto_encoder(param)
+            print(newLayer[0].size())
+            print(newLayer[2].size())
             sys.exit()
