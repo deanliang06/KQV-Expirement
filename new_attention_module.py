@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import sys
 
-class FragmentedAttentionModule(nn.Module):
+class Autoencoder(nn.Module):
     def __init__(self, d = 64):
         super().__init__()
         self.d = d
@@ -34,7 +34,23 @@ class FragmentedAttentionModule(nn.Module):
         attn_four,_ = self.attentionFive(attn_three, attn_three, attn_three)
         
         split = torch.split(attn_four, [312, 312, self.d])
-        model = torch.cat((self.detokenizer_compress(split[0]), self.detokenizer_decompress(split[1]), self.feature_detoken(split[2])))
-        return model
+        #THIS IS THE ISSUE
+        return self.detokenizer_compress(split[0]), self.detokenizer_decompress(split[1]), self.feature_detoken(split[2])
+    
+class FragmentedKQV(nn.Module):
+    def __init__(self, params, d = 64):
+        super().__init__()
+        self.comp = nn.Linear(312,d, bias=False)
+        self.comp.weight.data = params["comp"].reshape(64, 312)
+
+        self.feature = nn.Linear(d,d, bias=False)
+        self.feature.weight.data = params["feature"].reshape(d, d)
+
+        self.decomp = nn.Linear(d, 312)
+        self.decomp.weight.data = params["decomp"].reshape(312, d)
+        self.decomp.bias.data = params["bias"]
+    
+    def forward(self, x):
+        return self.decomp(self.feature(self.comp(x)))
 
 
