@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import sys
 
 class Autoencoder(nn.Module):
@@ -38,19 +39,21 @@ class Autoencoder(nn.Module):
         return self.detokenizer_compress(split[0]), self.detokenizer_decompress(split[1]), self.feature_detoken(split[2])
     
 class FragmentedKQV(nn.Module):
-    def __init__(self, params, d = 64):
+    def __init__(self, autoencoder, params, d = 64):
         super().__init__()
-        self.comp = nn.Linear(312,d, bias=False)
-        self.comp.weight.data = params["comp"].reshape(64, 312)
+        self.d = d
+        self.autoencoder = autoencoder
+        self.base_weights = params["weights"].detach()
+        self.base_bias = params["bias"].detach()
 
-        self.feature = nn.Linear(d,d, bias=False)
-        self.feature.weight.data = params["feature"].reshape(d, d)
-
-        self.decomp = nn.Linear(d, 312)
-        self.decomp.weight.data = params["decomp"].reshape(312, d)
-        self.decomp.bias.data = params["bias"]
-    
     def forward(self, x):
-        return self.decomp(self.feature(self.comp(x)))
+        comp, decomp, feature = self.autoencoder(self.base_weights)
+        comp = comp.reshape(self.d, 312)
+        decomp = decomp.reshape(312, self.d)
+        feature = feature.reshape(self.d, self.d)
+        x = F.linear(x, comp)
+        x = F.linear(x, feature)
+        return F.linear(x, decomp, self.base_bias)
+    
 
 
