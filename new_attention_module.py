@@ -3,19 +3,45 @@ import torch.nn as nn
 import torch.nn.functional as F
 import sys
 
+
+class AttnBlock(nn.Module):
+    def __init__(self, dim=64, heads=4, dropout=0.05, mlp_mult=4):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
+        self.ln2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_mult * dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_mult * dim, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        # Pre-norm attention
+        h = self.ln1(x)
+        h, _ = self.attn(h, h, h, need_weights=False)
+        x = x + h
+
+        # Pre-norm MLP
+        h = self.ln2(x)
+        x = x + self.mlp(h)
+        return x
+    
 class Autoencoder(nn.Module):
     def __init__(self, d = 64):
         super().__init__()
         self.d = d
         self.tokenizer = nn.Linear(312,64)
-        self.attention = nn.MultiheadAttention(64, 4, 0.05, batch_first=True)
-        self.attentionTwo = nn.MultiheadAttention(64, 4, 0.05, batch_first=True)
         self.summary_token = nn.Parameter(torch.randn(64))
-        self.attentionThree = nn.MultiheadAttention(64, 4, 0.05, batch_first=True)
+        self.atten_down_blocks = nn.ModuleList([AttnBlock(64, 4, 0.05, 4) for _ in range(5)])
 
+        
         self.proj = nn.Linear(64, 2*312*64+d*64)
-        self.attentionFour = nn.MultiheadAttention(64, 4)
-        self.attentionFive = nn.MultiheadAttention(64, 4)
+        self.proj_layernorm = nn.LayerNorm(64)
+
+        self.atten_up_blocks = nn.ModuleList([AttnBlock(64, 4, 0.05, 4) for _ in range(5)])   
         self.detokenizer_compress = nn.Linear(64, d)
         self.detokenizer_decompress = nn.Linear(64, d)
         self.feature_detoken = nn.Linear(64, d)
@@ -23,19 +49,18 @@ class Autoencoder(nn.Module):
     def forward(self, x):
         #encoding
         x = self.tokenizer(x)
-        attn,_ = self.attention(x,x,x)
-        attn_two,_ = self.attentionTwo(attn,attn,attn)
-        final = torch.concatenate((torch.unsqueeze(self.summary_token, 0),attn_two))
-        final_enc,_ = self.attentionThree(final, final, final)
-        hyper_rep = final_enc[0]
+        attn_sum = torch.concatenate((torch.unsqueeze(self.summary_token, 0),x))
+        for block in self.atten_down_blocks:
+            attn_sum = block(attn_sum)
+
+        hyper_rep = attn_sum[0]
 
         #decoding
-        proj = self.proj(hyper_rep).reshape(2*312+self.d, 64)
-        attn_three,_ = self.attentionFour(proj, proj, proj)
-        attn_four,_ = self.attentionFive(attn_three, attn_three, attn_three)
-        
-        split = torch.split(attn_four, [312, 312, self.d])
-        #THIS IS THE ISSUE
+        proj = self.proj(self.proj_layernorm(hyper_rep)).reshape(2*312+self.d, 64)
+        for block in self.atten_up_blocks:
+            proj = block(proj)
+
+        split = torch.split(proj, [312, 312, self.d])
         return self.detokenizer_compress(split[0]), self.detokenizer_decompress(split[1]), self.feature_detoken(split[2])
     
 class FragmentedKQV(nn.Module):
@@ -54,6 +79,9 @@ class FragmentedKQV(nn.Module):
         x = F.linear(x, comp)
         x = F.linear(x, feature)
         return F.linear(x, decomp, self.base_bias)
+
+
+
     
 
 

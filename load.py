@@ -1,5 +1,6 @@
 from transformers import AutoModel, AutoTokenizer
 import torch
+from torch import nn
 import sys
 from new_attention_module import Autoencoder, FragmentedKQV
 from datasets import load_dataset
@@ -9,12 +10,18 @@ import os
 def encode(example):
     return tok(example["text"], max_length=512, padding="max_length", truncation=True)
 
+def custom_loss(actual, pred, mse_percent):
+    mse_amount = mse_percent * nn.functional.mse_loss(pred, actual)
+    cos_amount = (1-mse_percent) * (-1*(-1*nn.functional.cosine_similarity(actual, pred, dim=2).nan_to_num(1).mean() + 1).log() * 1/4)
+    loss = cos_amount+mse_amount
+    return loss
 
-def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, loss_fn, epoch_num):
+
+def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, epoch_num):
     total_loss = 0
+    cos_sim = 0
+    kl_div_total = 0
     num = 0
-    autoencoder_model.eval()
-    original_model.eval()
     print(f"Num batches: {len(dataloader)}")
     for x in dataloader:
         num+=1
@@ -23,10 +30,9 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
         del x["text"]
         for k in x:
             x[k] = x[k].to("cuda", non_blocking=True)
-
-        original_output = original_model(**x)
-        actual_y = original_output.last_hidden_state
-        
+        with torch.no_grad():
+            actual_y = original_model(**x).last_hidden_state
+            
         if num == 1:
             for i, layer in enumerate(original_model.encoder.layer):
                 newModel = {}
@@ -40,24 +46,35 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
                 
                 if need:
                     if not isinstance(autoencoder_model.encoder.layer[i].attention.self.query, FragmentedKQV):
-                        autoencoder_model.encoder.layer[i].attention.self.query = FragmentedKQV(auto_encoder, newModel, d=64)
+                        autoencoder_model.encoder.layer[i].attention.self.query = FragmentedKQV(autoencoder, newModel, d=64)
                     need = False
             
         generated_ids = autoencoder_model(**x)
         pred = generated_ids.last_hidden_state
         
-        loss = loss_fn(pred, actual_y)
+        loss = custom_loss(actual_y, pred, 0.8)
+
         total_loss+=loss
+
+        cos = torch.nn.functional.cosine_similarity(pred, actual_y, dim=-1).mean()
+        cos_sim+=cos
+
+        kl_div = torch.nn.functional.kl_div(pred.log(), actual_y, reduction='batchmean')
+        kl_div_total+=kl_div
+        
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
 
-    print(f"Epoch #{epoch_num} Loss: {loss/len(dataloader)}")
+    print(f"Epoch #{epoch_num}\n-----------------")
+    print(f"MSE Loss: {loss/len(dataloader)}")
+    print(f"Cos Loss: {cos_sim/len(dataloader)}")
+    print(f"KL-Div Loss: {kl_div_total/len(dataloader)}")
 
 if __name__ == "__main__":
     #recons_scal = 0.25
     loss_scal = 0.5
-    lr = 0.003
+    lr = 0.001
     wd = 0.002
     epochs = 10
 
@@ -77,12 +94,11 @@ if __name__ == "__main__":
     #if os.path.exists("auto_encoder.pth"):
     #   auto_encoder.load_state_dict(torch.load("auto_encoder.pth", weights_only=True))
 
-    loss_fn = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(auto_encoder.parameters(), lr, weight_decay=wd)
 
 
     for it in range(epochs):
-        train(data, changed_model, model, auto_encoder, optimizer, loss_fn, it+1)
+        train(data, changed_model, model, auto_encoder, optimizer, it+1)
         torch.save(auto_encoder.state_dict(), "auto_encoder.pth")
 
 
