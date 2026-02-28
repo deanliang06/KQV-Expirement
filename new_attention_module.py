@@ -68,9 +68,11 @@ class FragmentedKQV(nn.Module):
         super().__init__()
         self.d = d
         self.autoencoder = autoencoder
-        self.base_weights = params["weights"].detach()
-        self.base_bias = params["bias"].detach()
+        self.register_buffer("base_weights", params["weights"].detach().to(next(autoencoder.parameters()).device))
+        self.register_buffer("base_bias", params["bias"].detach().to(next(autoencoder.parameters()).device))
 
+    def set_autoencoder(self, autoencoder):
+        self.autoencoder = autoencoder
     def forward(self, x):
         comp, decomp, feature = self.autoencoder(self.base_weights)
         comp = comp.reshape(self.d, 312)
