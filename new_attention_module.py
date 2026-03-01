@@ -49,7 +49,8 @@ class Autoencoder(nn.Module):
     def forward(self, x):
         #encoding
         x = self.tokenizer(x)
-        attn_sum = torch.concatenate((torch.unsqueeze(self.summary_token, 0),x))
+        summary = self.summary_token.view(1,64)
+        attn_sum = torch.concatenate((summary,x))
         for block in self.atten_down_blocks:
             attn_sum = block(attn_sum)
 

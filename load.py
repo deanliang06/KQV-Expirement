@@ -12,7 +12,7 @@ def encode(example):
 
 def custom_loss(actual, pred, mse_percent):
     mse_amount = mse_percent * nn.functional.mse_loss(pred, actual)
-    cos_amount = (1-mse_percent) * (-1*(torch.clamp_min(-1*nn.functional.cosine_similarity(actual, pred, dim=2).nan_to_num(1).mean() + 1, 1e-6)).log() * 1/4).nan_to_num(0)
+    cos_amount = ((1-mse_percent)/4) * (-1 * nn.functional.cosine_similarity(pred, actual, dim=-1).nan_to_num(0).mean() + 1)
     loss = cos_amount+mse_amount
     return loss
 
@@ -29,10 +29,9 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
         for k in x:
             x[k] = x[k].to("cuda", non_blocking=True)
         with torch.no_grad():
-            actual_y = original_model(**x).last_hidden_state.nan_to_num(0)
+            actual_y = original_model(**x).last_hidden_state
         
-        if num % 511 == 0:
-            print(f"Done with {num}")
+        print(f"Done with {num}")
         if num == 1:
             for i, layer in enumerate(original_model.encoder.layer):
                 newModel = {}
@@ -53,14 +52,28 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
             
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             generated_ids = autoencoder_model(**x)
-            pred = generated_ids.last_hidden_state.nan_to_num(0)
-            
+            pred = generated_ids.last_hidden_state
             loss = custom_loss(actual_y, pred, 0.8)
 
         scalar.scale(loss).backward()
+        scalar.unscale_(optimizer)
+        grad_norm = torch.nn.utils.clip_grad_norm_(auto_encoder.parameters(), 1.0)
+
+
+        if not torch.isfinite(grad_norm): #This is pretty hacky i guess
+            for name, p in auto_encoder.named_parameters():
+                if p.grad is None: 
+                    continue
+                if (p.grad.nan_to_num(0).mean() == 0):
+                    print(f"{name} is problematic")
+            optimizer.zero_grad(set_to_none=True)
+            scalar.update()
+            continue
+
         scalar.step(optimizer)
         scalar.update()
         optimizer.zero_grad(set_to_none=True)
+        
 
         total_loss+=loss.detach()
         with torch.no_grad():
@@ -81,7 +94,7 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
 if __name__ == "__main__":
     #recons_scal = 0.25
     loss_scal = 0.5
-    lrs = [1e-4, 3e-4, 1e-3, 3e-3]
+    lrs = [1e-5, 3e-5, 1e-4, 3e-4]
     wd = 0.002
     epochs = 10
 
@@ -94,6 +107,7 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModel.from_pretrained(url).to(device).eval()
     changed_model = AutoModel.from_pretrained(url).to(device).eval()
+    for p in changed_model.parameters(): p.requires_grad_(False)
 
     dataset = dataset.map(encode, batched=True, batch_size=1000).with_format(type="torch")
     data = DataLoader(dataset, batch_size=12, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
