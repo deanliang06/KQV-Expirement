@@ -2,7 +2,7 @@ from transformers import AutoModel, AutoTokenizer
 import torch
 from torch import nn
 import sys
-from new_attention_module import Autoencoder, FragmentedKQV
+from new_attention_module import Autoencoder, FragmentedKQV, CNNAutoencoder, CNNBasedFrag
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 import os
@@ -17,7 +17,7 @@ def custom_loss(actual, pred, mse_percent):
     return loss
 
 
-def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, epoch_num, scalar):
+def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, epoch_num, scalar, CNN_based=False):
     total_loss = 0
     cos_sim = 0
     kl_div_total = 0
@@ -30,8 +30,6 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
             x[k] = x[k].to("cuda", non_blocking=True)
         with torch.no_grad():
             actual_y = original_model(**x).last_hidden_state
-        
-        print(f"Done with {num}")
         if num == 1:
             for i, layer in enumerate(original_model.encoder.layer):
                 newModel = {}
@@ -44,8 +42,11 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
                         newModel["weights"] = param
                 
                 if need:
-                    if not isinstance(autoencoder_model.encoder.layer[i].attention.self.query, FragmentedKQV):
-                        autoencoder_model.encoder.layer[i].attention.self.query = FragmentedKQV(autoencoder, newModel, d=64)
+                    if not isinstance(autoencoder_model.encoder.layer[i].attention.self.query, (FragmentedKQV, CNNBasedFrag)):
+                        if not CNN_based:
+                            autoencoder_model.encoder.layer[i].attention.self.query = FragmentedKQV(autoencoder, newModel, d=64)
+                        else:
+                            autoencoder_model.encoder.layer[i].attention.self.query = CNNBasedFrag(autoencoder, newModel, d=64).to("cuda")                           
                     else:
                         autoencoder_model.encoder.layer[i].attention.self.query.set_autoencoder(autoencoder)
                     need=False
@@ -78,7 +79,6 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
         total_loss+=loss.detach()
         with torch.no_grad():
             cos = torch.nn.functional.cosine_similarity(pred, actual_y, dim=-1).mean()
-            print(cos.item())
             cos_sim+=cos.item()
 
             p = torch.log_softmax(pred, dim=-1)
@@ -94,8 +94,9 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
 if __name__ == "__main__":
     #recons_scal = 0.25
     loss_scal = 0.5
-    lrs = [1e-5, 3e-5, 1e-4, 3e-4]
+    lrs = [3e-4, 1e-4, 3e-5, 1e-5]
     wd = 0.002
+    CNN_based = True
     epochs = 10
 
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
@@ -117,10 +118,14 @@ if __name__ == "__main__":
 
     scalar = torch.amp.GradScaler()
     for lr in lrs:
-        auto_encoder = Autoencoder().to("cuda")
+        auto_encoder = None
+        if not CNN_based:
+            auto_encoder = Autoencoder().to("cuda")
+        else:
+            auto_encoder = CNNAutoencoder().to("cuda")
         optimizer = torch.optim.Adam(auto_encoder.parameters(), lr, weight_decay=wd)
         for it in range(epochs):
-            train(data, changed_model, model, auto_encoder, optimizer, it+1, scalar)
+            train(data, changed_model, model, auto_encoder, optimizer, it+1, scalar, CNN_based)
             torch.save(auto_encoder.state_dict(), f"auto_encoder_{lr}.pth")
 
 
