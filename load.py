@@ -94,7 +94,7 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
 if __name__ == "__main__":
     #recons_scal = 0.25
     loss_scal = 0.5
-    lrs = [3e-4, 1e-4, 3e-5, 1e-5]
+    lrs = [3e-4, 1e-4, 1e-3, 3e-3]
     wd = 0.002
     CNN_based = True
     epochs = 10
