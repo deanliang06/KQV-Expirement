@@ -2,7 +2,7 @@
 Lol I hope this works 
 
 
-Just Query:
+Just Query For miniBert using attn_auto:
 10 epochs (Attention Based)
 lr=1e-5 
 - really stable training (like linear decrease)
@@ -28,7 +28,7 @@ lr=3e-6
 - Cos Loss: 0.5828825340861767
 - KL-Div Loss: 21.301326486835517
 
-10 epochs (U-net Based)
+10 epochs (U-net Based (unet_auto) and minibert)
 lr=3e-4 
 - stable but then kinda bottoms-out
 - MSE Loss: 0.006003474351018667

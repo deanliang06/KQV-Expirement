@@ -2,9 +2,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 from torch import nn
 import sys
-from new_attention_module import Autoencoder, FragmentedKQV
-from unet_module import CNNAutoencoder, CNNBasedFrag
-
+from attention_auto import Autoencoder, FragmentedKQV
+from unet_auto import CNNAutoencoder, CNNBasedFrag
+from gpt_new_attn_matrix import GPTAttn
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from torchmetrics.text import Perplexity
@@ -26,7 +26,6 @@ def custom_loss(actual, pred, mse_percent):
 def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity):
     total_loss = 0
     cos_sim = 0
-    kl_div_total = 0
     total_perplexity = 0
     num = 0
     with torch.no_grad():
@@ -52,49 +51,38 @@ def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity):
 
             pscore = perplexity(preds=pred, target=target)
             total_perplexity+=(pscore.item()/len(dataloader))
-            
+
     print(f"Epoch Test #{epoch_num}\n-----------------")
     print(f"Average Perplexity: {total_perplexity}")
     print(f"MSE Loss: {total_loss/len(dataloader)}")
     print(f"Cos Sim: {cos_sim/len(dataloader)}")
 
-def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, epoch_num, scalar, CNN_based=False, perplexity=None):
+def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, epoch_num, scalar, perplexity=None):
     total_loss = 0
     cos_sim = 0
-    kl_div_total = 0
     num = 0
+    total_perlexity = 0
     print(f"Num batches: {len(dataloader)}")
     for x in dataloader:
         num+=1
         del x["text"]
         for k in x:
-          x[k] = x[k].to("cpu", non_blocking=True)
+          x[k] = x[k].to("cuda", non_blocking=True)
         with torch.no_grad():
             actual_y = original_model(**x).logits[:, :-1, :]
         if num == 1:
             for i, layer in enumerate(original_model.transformer.h):
+                params={}
                 for name, param in layer.attn.c_attn.named_parameters():
-                  print(name)
-                sys.exit()
+                    if name=="bias":
+                        params["bias"]=param
+                    else:
+                        params["weights"]=param
 
-            #     newModel = {}
-            #     need = False
-            #     for param in layer.attention.self.query.parameters():
-            #         need = True
-            #         if (param.dim() == 1):
-            #             newModel["bias"] = param
-            #         else:
-            #             newModel["weights"] = param
-
-            #     if need:
-            #         if not isinstance(autoencoder_model.encoder.layer[i].attention.self.query, (FragmentedKQV, CNNBasedFrag)):
-            #             if not CNN_based:
-            #                 autoencoder_model.encoder.layer[i].attention.self.query = FragmentedKQV(autoencoder, newModel, d=64)
-            #             else:
-            #                 autoencoder_model.encoder.layer[i].attention.self.query = CNNBasedFrag(autoencoder, newModel, d=64).to("cuda")
-            #         else:
-            #             autoencoder_model.encoder.layer[i].attention.self.query.set_autoencoder(autoencoder)
-            #         need=False
+                if not isinstance(autoencoder_model.transformer.h[i].attn.c_attn, GPTAttn):
+                    autoencoder_model.transformer.h[i].attn.c_attn = GPTAttn(auto_encoder, params, d=128).to("cuda")
+                else:
+                    autoencoder_model.transformer.h[i].attn.c_attn.set_autoencoder(autoencoder)
 
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             pred = autoencoder_model(**x).logits[:, :-1, :]
@@ -125,23 +113,18 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
             cos = torch.nn.functional.cosine_similarity(pred, actual_y, dim=-1).mean()
             cos_sim+=cos.item()
 
-            p = torch.log_softmax(pred, dim=-1)
-            q = torch.softmax(actual_y, dim=-1)
-            kl_div = torch.nn.functional.kl_div(p, q, reduction="batchmean")
-            kl_div_total+=kl_div.item()
 
     print(f"Epoch Train #{epoch_num}\n-----------------")
     print(f"MSE Loss: {total_loss/len(dataloader)}")
     print(f"Cos Sim: {cos_sim/len(dataloader)}")
-    print(f"KL-Div Loss: {kl_div_total/len(dataloader)}")
 
 if __name__ == "__main__":
     #recons_scal = 0.25
     loss_scal = 0.5
     lrs = [3e-4, 1e-4, 1e-3, 3e-3]
     wd = 0.002
-    CNN_based = True
     epochs = 10
+    N_EMBED = 768
 
     train_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
     test_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
@@ -166,14 +149,11 @@ if __name__ == "__main__":
 
     scalar = torch.amp.GradScaler()
     perplexity = Perplexity(ignore_index=tok.pad_token_id).to(device)
+
     for lr in lrs:
-        auto_encoder = None
-        if not CNN_based:
-            auto_encoder = Autoencoder().to(device)
-        else:
-            auto_encoder = CNNAutoencoder().to(device)
+        auto_encoder = CNNAutoencoder(ndim=N_EMBED, d=128).to(device)
         optimizer = torch.optim.Adam(auto_encoder.parameters(), lr, weight_decay=wd)
         for it in range(epochs):
-            train(data, changed_model, model, auto_encoder, optimizer, it+1, scalar, CNN_based, perplexity)
+            train(data, changed_model, model, auto_encoder, optimizer, it+1, scalar, perplexity)
             #test(t_data, changed_model, model, it+1, perplexity)
             torch.save(auto_encoder.state_dict(), f"auto_encoder_{lr}.pth")

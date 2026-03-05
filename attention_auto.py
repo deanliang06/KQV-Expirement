@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+####This file houses an obselete model with its results stated in the README
 
 class AttnBlock(nn.Module):
     def __init__(self, dim=64, heads=4, dropout=0.05, mlp_mult=4):
