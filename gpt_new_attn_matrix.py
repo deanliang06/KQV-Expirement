@@ -25,8 +25,7 @@ class GPTAttn(nn.Module):
 
     def forward(self, x):
         qx = self.UNet_layer(x)
-        kx = F.linear(x, self.q, self.q_bias)
+        kx = F.linear(x, self.k, self.k_bias)
         vx = F.linear(x, self.v, self.v_bias)
-        print(qx.size(), kx.size(), vx.size())
-        sys.exit()
+        x = torch.cat((qx, kx, vx), dim=-1)
         return x

@@ -2,8 +2,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 from torch import nn
 import sys
-from attention_auto import Autoencoder, FragmentedKQV
-from unet_auto import CNNAutoencoder, CNNBasedFrag
+from unet_auto import CNNAutoencoder
 from gpt_new_attn_matrix import GPTAttn
 from datasets import load_dataset
 from torch.utils.data import DataLoader
@@ -34,10 +33,8 @@ def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity):
             del x["text"]
             for k in x:
               x[k] = x[k].to("cuda")
-            
 
-
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
+            with torch.autocast(device_type="cuda", dtype=torch.float32):
               y = original_model(**x).logits[:, :-1, :]
               pred = autoencoder_model(**x).logits[:,:-1, :]
               loss = custom_loss(y, pred, 0.8)
@@ -86,8 +83,9 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
 
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             pred = autoencoder_model(**x).logits[:, :-1, :]
-            loss = custom_loss(actual_y, pred, 0.8)
-
+          
+        pred = pred.to(torch.float32)
+        loss = custom_loss(actual_y, pred, 0.8)
         scalar.scale(loss).backward()
         scalar.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(auto_encoder.parameters(), 1.0)
@@ -110,11 +108,17 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
 
         total_loss+=loss.detach()
         with torch.no_grad():
+            pnum = perplexity(preds=pred, target=x["input_ids"][:, 1:])
+            if not torch.isfinite(pnum):
+                print("Perplexity is not finite")
+                continue
+            total_perlexity+=(pnum.item()/len(dataloader))
             cos = torch.nn.functional.cosine_similarity(pred, actual_y, dim=-1).mean()
             cos_sim+=cos.item()
 
 
     print(f"Epoch Train #{epoch_num}\n-----------------")
+    print(f"Perplexity: {total_perlexity}")
     print(f"MSE Loss: {total_loss/len(dataloader)}")
     print(f"Cos Sim: {cos_sim/len(dataloader)}")
 
@@ -155,5 +159,5 @@ if __name__ == "__main__":
         optimizer = torch.optim.Adam(auto_encoder.parameters(), lr, weight_decay=wd)
         for it in range(epochs):
             train(data, changed_model, model, auto_encoder, optimizer, it+1, scalar, perplexity)
-            #test(t_data, changed_model, model, it+1, perplexity)
+            test(t_data, changed_model, model, it+1, perplexity)
             torch.save(auto_encoder.state_dict(), f"auto_encoder_{lr}.pth")
