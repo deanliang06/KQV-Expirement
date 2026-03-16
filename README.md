@@ -52,3 +52,15 @@ lr=3e-5
 - MSE Loss: 0.004621141590178013
 - Cos Sim: 0.9782083167749293
 - KL-Div Loss: 1.1464806598775528
+
+
+Unet with distilGPT-2
+Average Perplexity: 3148.377924321774
+MSE Loss: 23.93071746826172
+Cos Sim: 0.9973875254720121
+
+LAMBADA eval
+-----------------
+Original distilbert accurcy: 0.11419677734375%
+Our represnetation model accurcy: 0.0008072853088378906%
+Random initialization accurcy: 8e-5%
