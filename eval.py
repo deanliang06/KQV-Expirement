@@ -18,13 +18,12 @@ def test(dataloader, autoencoder_model, original_model, autoencoder, scalar):
     with torch.no_grad():
         for x in dataloader:
             num+=1
-            last_logit = x["input_ids"][:, -1]
+            last_logit = x["input_ids"][:, -1].to("cpu")
             for k in x:
-                if k == "input_ids":
-                    x[k] = x[k][:-1]
+                x[k] = x[k][:, :-1]
                 x[k] = x[k].to("cuda", non_blocking=True)
             with torch.no_grad():
-                actual_y = original_model(**x).logits[:, -1]
+                actual_y = original_model(**x).logits[:, -1:, :]
             if num == 1:
                 for i, layer in enumerate(original_model.transformer.h):
                     params={}
@@ -40,18 +39,18 @@ def test(dataloader, autoencoder_model, original_model, autoencoder, scalar):
                         autoencoder_model.transformer.h[i].attn.c_attn.set_autoencoder(autoencoder)
 
             with torch.autocast(device_type="cuda", dtype=torch.float32):
-                pred = autoencoder_model(**x).logits[:, -1]
+                pred = autoencoder_model(**x).logits[:, -1:, :]
                 
-            actual_logit = actual_y.argmax(-1)
-            my_logit = pred.argmax(-1)
+            actual_logit = actual_y.argmax(-1).to("cpu")
+            my_logit = pred.argmax(-1).to("cpu")
 
-            my_correct += (my_logit == last_logit).mean()
-            original_correct += (actual_logit == last_logit).mean()
+            my_correct += (my_logit == last_logit).to(torch.float16).mean()
+            original_correct += (actual_logit == last_logit).to(torch.float16).mean()
 
 
     print(f"LAMBADA eval\n-----------------")
-    print(f"Original distilbert accurcy: {original_correct/len(dataloader)}")
-    print(f"Our represnetation model accurcy: {my_correct/len(dataloader)}")
+    print(f"Original distilbert accurcy: {100*original_correct/len(dataloader)}")
+    print(f"Our represnetation model accurcy: {100*my_correct/len(dataloader)}")
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -63,11 +62,11 @@ if __name__ == "__main__":
     
     data_collator = DataCollatorForLanguageModeling(tokenizer=tok, mlm=False, return_tensors="pt")
     test_dataset = test_dataset.map(encode, batched=True, batch_size=1000, remove_columns=["text", "domain"]).with_format(type="torch")
-    test_dataloader = DataLoader(test_dataset, batch_size=24, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True, collate_fn=data_collator)
+    test_dataloader = DataLoader(test_dataset, batch_size=24, shuffle=True, num_workers=8, pin_memory=True, persistent_workers=True, collate_fn=data_collator)
 
     original_model = AutoModelForCausalLM.from_pretrained("distilgpt2").to(device).eval()
     autoencoder_model = AutoModelForCausalLM.from_pretrained("distilgpt2").to(device).eval()
-    model = CNNAutoencoder().to(device) 
+    model = CNNAutoencoder(768, 128).to(device) 
     if os.path.exists("auto_model.pth"):
         model.load_state_dict(torch.load("auto_model.pth", weights_only=True))
     else:
@@ -76,5 +75,3 @@ if __name__ == "__main__":
     scalar = torch.amp.GradScaler()
 
     test(test_dataloader, autoencoder_model, original_model, model, scalar)
-
-
