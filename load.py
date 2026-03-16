@@ -34,7 +34,7 @@ def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity):
             for k in x:
               x[k] = x[k].to("cuda")
 
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
+            with torch.autocast(device_type="cuda", dtype=torch.float32):
               y = original_model(**x).logits[:, :-1, :]
               pred = autoencoder_model(**x).logits[:,:-1, :]
               loss = custom_loss(y, pred, 0.8)
@@ -85,7 +85,7 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
                 else:
                     autoencoder_model.transformer.h[i].attn.c_attn.set_autoencoder(autoencoder)
 
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
             pred = autoencoder_model(**x).logits[:, :-1, :]
 
         pred = pred.to(torch.float32)
