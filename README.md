@@ -61,6 +61,6 @@ Cos Sim: 0.9973875254720121
 
 LAMBADA eval
 -----------------
-Original distilbert accurcy: 0.11419677734375%
-Our represnetation model accurcy: 0.0008072853088378906%
-Random initialization accurcy: 8e-5%
+Original distilbert accurcy: 0.11419677734375
+Our represnetation model accurcy: 0.0008072853088378906
+Random initialization accurcy: 8e-5

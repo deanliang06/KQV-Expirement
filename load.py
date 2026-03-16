@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, DataCollatorForLanguageModeling
 import torch
 from torch import nn
 import sys
@@ -10,7 +10,7 @@ from torchmetrics.text import Perplexity
 import os
 
 def encode(example):
-    return tok(example["text"], max_length=512, padding="max_length", truncation=True)
+    return tok(example["text"])
 
 def decode(text):
     return tok.decode(text, skip_special_tokens=True)
@@ -30,7 +30,6 @@ def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity):
     with torch.no_grad():
         for x in dataloader:
             num+=1
-            del x["text"]
             for k in x:
               x[k] = x[k].to("cuda")
 
@@ -66,7 +65,6 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
     print(f"Num batches: {len(dataloader)}")
     for x in dataloader:
         num+=1
-        del x["text"]
         for k in x:
           x[k] = x[k].to("cuda", non_blocking=True)
         with torch.no_grad():
@@ -140,18 +138,19 @@ if __name__ == "__main__":
     url = "distilgpt2"
 
 
-    tok = AutoTokenizer.from_pretrained(url, max_length=512)
+    tok = AutoTokenizer.from_pretrained(url)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tok, mlm=False, return_tensors="pt")
     model = AutoModelForCausalLM.from_pretrained(url).to(device).eval()
     changed_model = AutoModelForCausalLM.from_pretrained(url).to(device).eval()
     for p in changed_model.parameters(): p.requires_grad_(False)
 
-    dataset = train_dataset.map(encode, batched=True, batch_size=1000).with_format(type="torch")
-    t_dataset = test_dataset.map(encode, batched=True, batch_size=1000).with_format(type="torch")
-    data = DataLoader(dataset, batch_size=12, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
+    dataset = train_dataset.map(encode, batched=True, batch_size=1000, remove_columns=["text"]).with_format(type="torch")
+    t_dataset = test_dataset.map(encode, batched=True, batch_size=1000, remove_columns=["text"]).with_format(type="torch")
+    data = DataLoader(dataset, batch_size=12, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True, collate_fn=data_collator)
     t_data = DataLoader(t_dataset, batch_size=12, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
     #if os.path.exists("auto_encoder.pth"):
     #   auto_encoder.load_state_dict(torch.load("auto_encoder.pth", weights_only=True))
