@@ -7,7 +7,6 @@ from datasets import load_dataset
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchmetrics.text import Perplexity
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
 
@@ -37,16 +36,6 @@ svd_gpt_attn = load_module("svd_gpt_attn", SVD_DIR / "gpt_new_attn_matrix.py")
 
 def encode(example):
     return tok(example["text"])
-
-
-def custom_loss(actual, pred, kl, T=2.0):
-    actual = F.softmax(actual / T, dim=-1)
-    pred = F.log_softmax(pred / T, dim=-1)
-
-    kl_loss = kl * F.kl_div(pred, actual, reduction="batchmean") * (T * T)
-    hard_targ = pred.argmax(-1)
-    cross = (1 - kl) * F.cross_entropy(pred, hard_targ)
-    return cross + kl_loss
 
 
 def attach_root_unet_wrappers(target_model, source_model, autoencoder, d=128, device="cuda"):
@@ -91,41 +80,40 @@ def attach_svd_wrappers(target_model, source_model, rank=128, device="cuda"):
         target_model.transformer.h[i].attn.c_attn = svd_gpt_attn.GPTAttn(params, rank=rank).to(device)
 
 
-def evaluate_model(dataloader, candidate_model, original_model, perplexity, device):
-    total_loss = 0
-    total_cos = 0
-    total_perplexity = 0
+def evaluate_model(dataloader, candidate_model, original_model, device):
+    original_correct = 0.0
+    candidate_correct = 0.0
+    total_mse = 0.0
     used_batches = 0
 
     with torch.no_grad():
         for x in dataloader:
+            last_token = x["input_ids"][:, -1].to("cpu")
             for k in x:
-                x[k] = x[k].to(device)
+                x[k] = x[k][:, :-1].to(device, non_blocking=device == "cuda")
 
-            autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float32) if device == "cuda" else nullcontext()
+            autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16) if device == "cuda" else nullcontext()
             with autocast_ctx:
-                actual = original_model(**x).logits[:, :-1, :]
-                pred = candidate_model(**x).logits[:, :-1, :]
-                loss = custom_loss(actual, pred, 0.8)
+                actual = original_model(**x).logits[:, -1, :]
+                pred = candidate_model(**x).logits[:, -1, :]
+                mse = F.mse_loss(pred.float(), actual.float())
 
-            if not torch.isfinite(loss):
-                continue
-
-            pscore = perplexity(preds=pred, target=x["input_ids"][:, 1:])
-            if not torch.isfinite(pscore):
+            if not torch.isfinite(mse):
                 continue
 
             used_batches += 1
-            total_loss += loss.detach()
-            total_cos += torch.nn.functional.cosine_similarity(pred, actual, dim=-1).mean().item()
-            total_perplexity += pscore.item()
+            total_mse += mse.item()
+            actual_logit = actual.argmax(-1).to("cpu")
+            candidate_logit = pred.argmax(-1).to("cpu")
+            original_correct += (actual_logit == last_token).to(torch.float32).mean().item()
+            candidate_correct += (candidate_logit == last_token).to(torch.float32).mean().item()
 
     denom = max(used_batches, 1)
     return {
         "batches": used_batches,
-        "perplexity": total_perplexity / denom,
-        "custom_loss": (total_loss / denom).item() if torch.is_tensor(total_loss) else float(total_loss),
-        "cosine_similarity": total_cos / denom,
+        "original_lambada_accuracy": 100.0 * original_correct / denom,
+        "candidate_lambada_accuracy": 100.0 * candidate_correct / denom,
+        "mean_squared_error": total_mse / denom,
     }
 
 
@@ -135,26 +123,25 @@ if __name__ == "__main__":
     embed_checkpoint = EMBED_DIR / "embedding_auto_model.pth"
     svd_rank = 128
 
-    tok = AutoTokenizer.from_pretrained(url)
+    tok = AutoTokenizer.from_pretrained(url, max_length=512)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     data_collator = DataCollatorForLanguageModeling(tokenizer=tok, mlm=False, return_tensors="pt")
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-    dataset = dataset.map(encode, batched=True, batch_size=1000, remove_columns=["text"]).with_format(type="torch")
+    dataset = load_dataset("cimec/lambada", split="test")
+    dataset = dataset.map(encode, batched=True, batch_size=1000, remove_columns=["text", "domain"]).with_format(type="torch")
     dataloader = DataLoader(
         dataset,
-        batch_size=12,
+        batch_size=24,
         shuffle=True,
         num_workers=2,
-        pin_memory=True,
+        pin_memory=device == "cuda",
         persistent_workers=True,
         collate_fn=data_collator,
     )
 
     original_model = AutoModelForCausalLM.from_pretrained(url).to(device).eval()
-    perplexity = Perplexity(ignore_index=tok.pad_token_id).to(device)
 
     if root_checkpoint.exists():
         root_model = AutoModelForCausalLM.from_pretrained(url).to(device).eval()
@@ -164,7 +151,7 @@ if __name__ == "__main__":
         root_autoencoder = root_unet_auto.CNNAutoencoder(ndim=768, d=128).to(device)
         root_autoencoder.load_state_dict(torch.load(root_checkpoint, map_location=device, weights_only=True))
         attach_root_unet_wrappers(root_model, original_model, root_autoencoder, d=128, device=device)
-        root_metrics = evaluate_model(dataloader, root_model, original_model, perplexity, device)
+        root_metrics = evaluate_model(dataloader, root_model, original_model, device)
         print("Original U-Net experiment")
         print("-----------------")
         for key, value in root_metrics.items():
@@ -182,7 +169,7 @@ if __name__ == "__main__":
         embed_autoencoder = embed_auto.UNetEmbeddingAutoencoder(ndim=768, embedding_dim=128).to(device)
         embed_autoencoder.load_state_dict(torch.load(embed_checkpoint, map_location=device, weights_only=True))
         attach_embedding_wrappers(embed_model, original_model, embed_autoencoder, device=device)
-        embed_metrics = evaluate_model(dataloader, embed_model, original_model, perplexity, device)
+        embed_metrics = evaluate_model(dataloader, embed_model, original_model, device)
         print("Embedding bottleneck U-Net experiment")
         print("-----------------")
         for key, value in embed_metrics.items():
@@ -197,7 +184,7 @@ if __name__ == "__main__":
         p.requires_grad_(False)
 
     attach_svd_wrappers(svd_model, original_model, rank=svd_rank, device=device)
-    svd_metrics = evaluate_model(dataloader, svd_model, original_model, perplexity, device)
+    svd_metrics = evaluate_model(dataloader, svd_model, original_model, device)
     print(f"SVD baseline experiment, rank={svd_rank}")
     print("-----------------")
     for key, value in svd_metrics.items():

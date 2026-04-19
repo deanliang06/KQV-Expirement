@@ -8,7 +8,6 @@ from datasets import load_dataset
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchmetrics.text import Perplexity
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
 if __package__ in (None, ""):
@@ -25,16 +24,6 @@ def encode(example):
     return tok(example["text"])
 
 
-def custom_loss(actual, pred, kl, T=2.0):
-    actual = F.softmax(actual / T, dim=-1)
-    pred = F.log_softmax(pred / T, dim=-1)
-
-    kl_loss = kl * F.kl_div(pred, actual, reduction="batchmean") * (T * T)
-    hard_targ = pred.argmax(-1)
-    cross = (1 - kl) * F.cross_entropy(pred, hard_targ)
-    return cross + kl_loss
-
-
 def attach_gpt_wrappers(target_model, source_model, rank=128, device="cuda"):
     for i, layer in enumerate(source_model.transformer.h):
         params = {}
@@ -47,41 +36,40 @@ def attach_gpt_wrappers(target_model, source_model, rank=128, device="cuda"):
         target_model.transformer.h[i].attn.c_attn = GPTAttn(params, rank=rank).to(device)
 
 
-def evaluate(dataloader, approx_model, original_model, perplexity, device):
-    total_loss = 0
-    total_cos = 0
-    total_perplexity = 0
+def evaluate(dataloader, approx_model, original_model, device):
+    original_correct = 0.0
+    approx_correct = 0.0
+    total_mse = 0.0
     used_batches = 0
 
     with torch.no_grad():
         for x in dataloader:
+            last_token = x["input_ids"][:, -1].to("cpu")
             for k in x:
-                x[k] = x[k].to(device)
+                x[k] = x[k][:, :-1].to(device, non_blocking=device == "cuda")
 
             autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16) if device == "cuda" else nullcontext()
             with autocast_ctx:
-                actual = original_model(**x).logits[:, :-1, :]
-                pred = approx_model(**x).logits[:, :-1, :]
-                loss = custom_loss(actual, pred, 0.8)
+                actual = original_model(**x).logits[:, -1, :]
+                pred = approx_model(**x).logits[:, -1, :]
+                mse = F.mse_loss(pred.float(), actual.float())
 
-            if not torch.isfinite(loss):
-                continue
-
-            pscore = perplexity(preds=pred, target=x["input_ids"][:, 1:])
-            if not torch.isfinite(pscore):
+            if not torch.isfinite(mse):
                 continue
 
             used_batches += 1
-            total_loss += loss.detach()
-            total_cos += torch.nn.functional.cosine_similarity(pred, actual, dim=-1).mean().item()
-            total_perplexity += pscore.item()
+            total_mse += mse.item()
+            actual_logit = actual.argmax(-1).to("cpu")
+            approx_logit = pred.argmax(-1).to("cpu")
+            approx_correct += (approx_logit == last_token).to(torch.float32).mean().item()
+            original_correct += (actual_logit == last_token).to(torch.float32).mean().item()
 
     denom = max(used_batches, 1)
     return {
         "batches": used_batches,
-        "perplexity": total_perplexity / denom,
-        "custom_loss": (total_loss / denom).item() if torch.is_tensor(total_loss) else float(total_loss),
-        "cosine_similarity": total_cos / denom,
+        "original_lambada_accuracy": 100.0 * original_correct / denom,
+        "svd_lambada_accuracy": 100.0 * approx_correct / denom,
+        "mean_squared_error": total_mse / denom,
     }
 
 
@@ -93,9 +81,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     url = "distilgpt2"
-    test_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    test_dataset = load_dataset("cimec/lambada", split="test")
 
-    tok = AutoTokenizer.from_pretrained(url)
+    tok = AutoTokenizer.from_pretrained(url, max_length=512)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
@@ -106,7 +94,7 @@ if __name__ == "__main__":
     for p in svd_model.parameters():
         p.requires_grad_(False)
 
-    dataset = test_dataset.map(encode, batched=True, batch_size=1000, remove_columns=["text"]).with_format(type="torch")
+    dataset = test_dataset.map(encode, batched=True, batch_size=1000, remove_columns=["text", "domain"]).with_format(type="torch")
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -116,14 +104,13 @@ if __name__ == "__main__":
         persistent_workers=args.num_workers > 0,
         collate_fn=data_collator,
     )
-    perplexity = Perplexity(ignore_index=tok.pad_token_id).to(device)
 
     attach_gpt_wrappers(svd_model, original_model, rank=args.rank, device=device)
-    metrics = evaluate(dataloader, svd_model, original_model, perplexity, device)
+    metrics = evaluate(dataloader, svd_model, original_model, device)
 
-    print(f"SVD baseline on WikiText-2 test, rank={args.rank}")
+    print(f"SVD baseline on LAMBADA test, rank={args.rank}")
     print("-----------------")
     print(f"Used batches: {metrics['batches']}")
-    print(f"Average Perplexity: {metrics['perplexity']}")
-    print(f"Custom Loss: {metrics['custom_loss']}")
-    print(f"Cos Sim: {metrics['cosine_similarity']}")
+    print(f"Original distilgpt2 LAMBADA accuracy: {metrics['original_lambada_accuracy']}")
+    print(f"SVD baseline LAMBADA accuracy: {metrics['svd_lambada_accuracy']}")
+    print(f"Mean squared error: {metrics['mean_squared_error']}")

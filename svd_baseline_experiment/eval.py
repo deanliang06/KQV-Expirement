@@ -5,6 +5,7 @@ import sys
 
 from datasets import load_dataset
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
@@ -25,6 +26,7 @@ def encode(example):
 def test(dataloader, approx_model, original_model, device, rank):
     original_correct = 0
     approx_correct = 0
+    total_mse = 0.0
     attached = False
     print(f"Num batches in test: {len(dataloader)}")
 
@@ -34,7 +36,7 @@ def test(dataloader, approx_model, original_model, device, rank):
             for k in x:
                 x[k] = x[k][:, :-1].to(device, non_blocking=device.type == "cuda")
 
-            actual_y = original_model(**x).logits[:, -1:, :]
+            actual_y = original_model(**x).logits[:, -1, :]
 
             if not attached:
                 for i, layer in enumerate(original_model.transformer.h):
@@ -49,10 +51,11 @@ def test(dataloader, approx_model, original_model, device, rank):
                 attached = True
 
             with torch.autocast(device_type="cuda", dtype=torch.float16) if device.type == "cuda" else nullcontext():
-                pred = approx_model(**x).logits[:, -1:, :]
+                pred = approx_model(**x).logits[:, -1, :]
 
             actual_logit = actual_y.argmax(-1).to("cpu")
             approx_logit = pred.argmax(-1).to("cpu")
+            total_mse += F.mse_loss(pred.float(), actual_y.float()).item()
 
             approx_correct += (approx_logit == last_logit).to(torch.float16).mean()
             original_correct += (actual_logit == last_logit).to(torch.float16).mean()
@@ -60,6 +63,7 @@ def test(dataloader, approx_model, original_model, device, rank):
     print("LAMBADA eval\n-----------------")
     print(f"Original distilgpt2 accuracy: {100 * original_correct / len(dataloader)}")
     print(f"SVD baseline accuracy: {100 * approx_correct / len(dataloader)}")
+    print(f"Mean squared error: {total_mse / len(dataloader)}")
 
 
 if __name__ == "__main__":

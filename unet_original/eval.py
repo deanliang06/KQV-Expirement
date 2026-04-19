@@ -5,6 +5,7 @@ import sys
 
 from datasets import load_dataset
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
@@ -36,6 +37,7 @@ def autocast_context(device):
 def test(dataloader, autoencoder_model, original_model, autoencoder, device):
     original_correct = 0
     my_correct = 0
+    total_mse = 0.0
     num = 0
     print(f"Num batches in test: {len(dataloader)}")
     with torch.no_grad():
@@ -46,7 +48,7 @@ def test(dataloader, autoencoder_model, original_model, autoencoder, device):
                 x[k] = x[k][:, :-1]
                 x[k] = x[k].to(device, non_blocking=device.type == "cuda")
             with torch.no_grad():
-                actual_y = original_model(**x).logits[:, -1:, :]
+                actual_y = original_model(**x).logits[:, -1, :]
             if num == 1:
                 for i, layer in enumerate(original_model.transformer.h):
                     params = {}
@@ -62,10 +64,11 @@ def test(dataloader, autoencoder_model, original_model, autoencoder, device):
                         autoencoder_model.transformer.h[i].attn.c_attn.set_autoencoder(autoencoder)
 
             with autocast_context(device):
-                pred = autoencoder_model(**x).logits[:, -1:, :]
+                pred = autoencoder_model(**x).logits[:, -1, :]
 
             actual_logit = actual_y.argmax(-1).to("cpu")
             my_logit = pred.argmax(-1).to("cpu")
+            total_mse += F.mse_loss(pred.float(), actual_y.float()).item()
 
             my_correct += (my_logit == last_logit).to(torch.float16).mean()
             original_correct += (actual_logit == last_logit).to(torch.float16).mean()
@@ -73,6 +76,7 @@ def test(dataloader, autoencoder_model, original_model, autoencoder, device):
     print("LAMBADA eval\n-----------------")
     print(f"Original distilbert accurcy: {100 * original_correct / len(dataloader)}")
     print(f"Our represnetation model accurcy: {100 * my_correct / len(dataloader)}")
+    print(f"Mean squared error: {total_mse / len(dataloader)}")
 
 
 if __name__ == "__main__":

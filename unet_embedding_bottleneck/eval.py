@@ -4,6 +4,7 @@ import sys
 
 from datasets import load_dataset
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
@@ -45,6 +46,7 @@ def attach_gpt_wrappers(target_model, source_model, autoencoder, device="cuda"):
 def test(dataloader, autoencoder_model, original_model, device):
     original_correct = 0
     my_correct = 0
+    total_mse = 0.0
 
     print(f"Num batches in test: {len(dataloader)}")
     with torch.no_grad():
@@ -53,11 +55,12 @@ def test(dataloader, autoencoder_model, original_model, device):
             for k in x:
                 x[k] = x[k][:, :-1].to(device, non_blocking=device.type == "cuda")
 
-            actual_y = original_model(**x).logits[:, -1:, :]
-            pred = autoencoder_model(**x).logits[:, -1:, :]
+            actual_y = original_model(**x).logits[:, -1, :]
+            pred = autoencoder_model(**x).logits[:, -1, :]
 
             actual_logit = actual_y.argmax(-1).to("cpu")
             my_logit = pred.argmax(-1).to("cpu")
+            total_mse += F.mse_loss(pred.float(), actual_y.float()).item()
 
             my_correct += (my_logit == last_logit).to(torch.float16).mean()
             original_correct += (actual_logit == last_logit).to(torch.float16).mean()
@@ -65,6 +68,7 @@ def test(dataloader, autoencoder_model, original_model, device):
     print("LAMBADA eval\n-----------------")
     print(f"Original distilgpt2 accuracy: {100 * original_correct / len(dataloader)}")
     print(f"Embedding bottleneck model accuracy: {100 * my_correct / len(dataloader)}")
+    print(f"Mean squared error: {total_mse / len(dataloader)}")
 
 
 if __name__ == "__main__":
