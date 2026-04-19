@@ -1,4 +1,7 @@
+from contextlib import nullcontext
 from pathlib import Path
+import os
+import sys
 
 from datasets import load_dataset
 import torch
@@ -7,8 +10,16 @@ from torch.utils.data import DataLoader
 from torchmetrics.text import Perplexity
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
-from gpt_new_attn_matrix import GPTAttn
-from unet_embedding_auto import UNetEmbeddingAutoencoder
+if __package__ in (None, ""):
+    ROOT = Path(__file__).resolve().parents[1]
+    root_str = str(ROOT)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from unet_embedding_bottleneck.gpt_new_attn_matrix import GPTAttn
+    from unet_embedding_bottleneck.unet_embedding_auto import UNetEmbeddingAutoencoder
+else:
+    from .gpt_new_attn_matrix import GPTAttn
+    from .unet_embedding_auto import UNetEmbeddingAutoencoder
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -71,7 +82,19 @@ def collect_trainable_params(autoencoder):
     return [param for param in autoencoder.parameters() if param.requires_grad]
 
 
-def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity):
+def autocast_context(device):
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    return nullcontext()
+
+
+def move_batch_to_device(batch, device):
+    for key in batch:
+        batch[key] = batch[key].to(device, non_blocking=device.type == "cuda")
+    return batch
+
+
+def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity, device):
     total_loss = 0
     total_matrix_l2 = 0
     total_token_ce = 0
@@ -80,10 +103,9 @@ def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity):
 
     with torch.no_grad():
         for x in dataloader:
-            for k in x:
-                x[k] = x[k].to("cuda")
+            x = move_batch_to_device(x, device)
 
-            with torch.autocast(device_type="cuda", dtype=torch.float32):
+            with autocast_context(device):
                 y = original_model(**x).logits[:, :-1, :]
                 pred = autoencoder_model(**x).logits[:, :-1, :]
                 target = x["input_ids"][:, 1:]
@@ -110,7 +132,7 @@ def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity):
     print(f"Cos Sim: {cos_sim / len(dataloader)}")
 
 
-def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, epoch_num, scalar, perplexity):
+def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, epoch_num, scalar, perplexity, device):
     total_loss = 0
     total_matrix_l2 = 0
     total_token_ce = 0
@@ -119,13 +141,12 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
     print(f"Num batches: {len(dataloader)}")
 
     for x in dataloader:
-        for k in x:
-            x[k] = x[k].to("cuda", non_blocking=True)
+        x = move_batch_to_device(x, device)
 
         with torch.no_grad():
             actual_y = original_model(**x).logits[:, :-1, :]
 
-        with torch.autocast(device_type="cuda", dtype=torch.float32):
+        with autocast_context(device):
             pred = autoencoder_model(**x).logits[:, :-1, :]
 
         pred = pred.to(torch.float32)
@@ -164,7 +185,7 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
 
 
 if __name__ == "__main__":
-    lrs = 3e-5
+    lr = 3e-5
     wd = 0.002
     epochs = 10
     n_embed = 768
@@ -178,7 +199,8 @@ if __name__ == "__main__":
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_workers = min(2, os.cpu_count() or 0)
     data_collator = DataCollatorForLanguageModeling(tokenizer=tok, mlm=False, return_tensors="pt")
     model = AutoModelForCausalLM.from_pretrained(url).to(device).eval()
 
@@ -188,18 +210,18 @@ if __name__ == "__main__":
         dataset,
         batch_size=12,
         shuffle=True,
-        num_workers=2,
-        pin_memory=True,
-        persistent_workers=True,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=num_workers > 0,
         collate_fn=data_collator,
     )
     t_data = DataLoader(
         t_dataset,
         batch_size=12,
         shuffle=True,
-        num_workers=2,
-        pin_memory=True,
-        persistent_workers=True,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=num_workers > 0,
         collate_fn=data_collator,
     )
 
@@ -213,10 +235,10 @@ if __name__ == "__main__":
 
     attach_gpt_wrappers(changed_model, model, auto_encoder, device=device)
     optimizer = torch.optim.Adam(collect_trainable_params(auto_encoder), lr, weight_decay=wd)
-    scalar = torch.amp.GradScaler()
+    scalar = torch.amp.GradScaler(enabled=device.type == "cuda")
     perplexity = Perplexity(ignore_index=tok.pad_token_id).to(device)
 
     for it in range(epochs):
-        train(data, changed_model, model, auto_encoder, optimizer, it + 1, scalar, perplexity)
-        test(t_data, changed_model, model, it + 1, perplexity)
+        train(data, changed_model, model, auto_encoder, optimizer, it + 1, scalar, perplexity, device)
+        test(t_data, changed_model, model, it + 1, perplexity, device)
         torch.save(auto_encoder.state_dict(), CHECKPOINT_PATH)

@@ -1,5 +1,8 @@
 import argparse
 from contextlib import nullcontext
+import os
+from pathlib import Path
+import sys
 
 from datasets import load_dataset
 import torch
@@ -8,7 +11,14 @@ from torch.utils.data import DataLoader
 from torchmetrics.text import Perplexity
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
-from gpt_new_attn_matrix import GPTAttn
+if __package__ in (None, ""):
+    ROOT = Path(__file__).resolve().parents[1]
+    root_str = str(ROOT)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from svd_baseline_experiment.gpt_new_attn_matrix import GPTAttn
+else:
+    from .gpt_new_attn_matrix import GPTAttn
 
 
 def encode(example):
@@ -48,7 +58,7 @@ def evaluate(dataloader, approx_model, original_model, perplexity, device):
             for k in x:
                 x[k] = x[k].to(device)
 
-            autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float32) if device == "cuda" else nullcontext()
+            autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16) if device == "cuda" else nullcontext()
             with autocast_ctx:
                 actual = original_model(**x).logits[:, :-1, :]
                 pred = approx_model(**x).logits[:, :-1, :]
@@ -79,6 +89,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--rank", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=12)
+    parser.add_argument("--num-workers", type=int, default=min(2, os.cpu_count() or 0))
     args = parser.parse_args()
 
     url = "distilgpt2"
@@ -100,9 +111,9 @@ if __name__ == "__main__":
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=2,
-        pin_memory=True,
-        persistent_workers=True,
+        num_workers=args.num_workers,
+        pin_memory=device == "cuda",
+        persistent_workers=args.num_workers > 0,
         collate_fn=data_collator,
     )
     perplexity = Perplexity(ignore_index=tok.pad_token_id).to(device)

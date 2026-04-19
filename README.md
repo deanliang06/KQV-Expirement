@@ -1,6 +1,24 @@
 # KQV-Expirement
 Lol I hope this works 
 
+## Colab
+
+This repo now includes a starter notebook at `colab_entrypoint.ipynb`.
+
+Use a Colab GPU runtime, then either:
+
+- open the notebook directly from the repo in Colab and set `REPO_URL`
+- or clone the repo in a fresh notebook and run the same commands manually
+
+The quickest smoke test is the SVD baseline:
+
+```bash
+pip install -r requirements.txt
+python -m svd_baseline_experiment.load --rank 128
+```
+
+The U-Net scripts also run in Colab, but they are much heavier and are only practical on a GPU runtime.
+
 
 Just Query For miniBert using attn_auto:
 10 epochs (Attention Based)

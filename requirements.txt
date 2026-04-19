@@ -1,3 +1,4 @@
-transformers==4.49
-nvidia-cuda-runtime-cu12
+transformers==4.49.0
 datasets
+torchmetrics
+torchvision

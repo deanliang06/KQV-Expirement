@@ -1,8 +1,18 @@
+from pathlib import Path
+import sys
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from svd_q_auto import TruncatedSVDQ
+if __package__ in (None, ""):
+    ROOT = Path(__file__).resolve().parents[1]
+    root_str = str(ROOT)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from svd_baseline_experiment.svd_q_auto import TruncatedSVDQ
+else:
+    from .svd_q_auto import TruncatedSVDQ
 
 
 class GPTAttn(nn.Module):

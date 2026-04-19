@@ -1,12 +1,22 @@
 from pathlib import Path
+import os
+import sys
 
 from datasets import load_dataset
 import torch
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
-from gpt_new_attn_matrix import GPTAttn
-from unet_embedding_auto import UNetEmbeddingAutoencoder
+if __package__ in (None, ""):
+    ROOT = Path(__file__).resolve().parents[1]
+    root_str = str(ROOT)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from unet_embedding_bottleneck.gpt_new_attn_matrix import GPTAttn
+    from unet_embedding_bottleneck.unet_embedding_auto import UNetEmbeddingAutoencoder
+else:
+    from .gpt_new_attn_matrix import GPTAttn
+    from .unet_embedding_auto import UNetEmbeddingAutoencoder
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -32,7 +42,7 @@ def attach_gpt_wrappers(target_model, source_model, autoencoder, device="cuda"):
             target_model.transformer.h[i].attn.c_attn.set_autoencoder(autoencoder)
 
 
-def test(dataloader, autoencoder_model, original_model):
+def test(dataloader, autoencoder_model, original_model, device):
     original_correct = 0
     my_correct = 0
 
@@ -41,7 +51,7 @@ def test(dataloader, autoencoder_model, original_model):
         for x in dataloader:
             last_logit = x["input_ids"][:, -1].to("cpu")
             for k in x:
-                x[k] = x[k][:, :-1].to("cuda", non_blocking=True)
+                x[k] = x[k][:, :-1].to(device, non_blocking=device.type == "cuda")
 
             actual_y = original_model(**x).logits[:, -1:, :]
             pred = autoencoder_model(**x).logits[:, -1:, :]
@@ -58,7 +68,8 @@ def test(dataloader, autoencoder_model, original_model):
 
 
 if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_workers = min(2, os.cpu_count() or 0)
     test_dataset = load_dataset("cimec/lambada", split="test")
 
     tok = AutoTokenizer.from_pretrained("distilgpt2", max_length=512)
@@ -71,9 +82,9 @@ if __name__ == "__main__":
         test_dataset,
         batch_size=24,
         shuffle=True,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=num_workers > 0,
         collate_fn=data_collator,
     )
 
@@ -87,4 +98,4 @@ if __name__ == "__main__":
         raise FileNotFoundError(f"Missing checkpoint: {CHECKPOINT_PATH}")
 
     attach_gpt_wrappers(autoencoder_model, original_model, model, device=device)
-    test(test_dataloader, autoencoder_model, original_model)
+    test(test_dataloader, autoencoder_model, original_model, device)

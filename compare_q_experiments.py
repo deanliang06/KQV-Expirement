@@ -28,8 +28,8 @@ def load_module(module_name, file_path):
     return module
 
 
-root_unet_auto = load_module("root_unet_auto", ROOT / "unet_auto.py")
-root_gpt_attn = load_module("root_gpt_attn", ROOT / "gpt_new_attn_matrix.py")
+root_unet_auto = load_module("root_unet_auto", ROOT / "unet_original" / "unet_auto.py")
+root_gpt_attn = load_module("root_gpt_attn", ROOT / "unet_original" / "gpt_new_attn_matrix.py")
 embed_auto = load_module("embed_auto", EMBED_DIR / "unet_embedding_auto.py")
 embed_gpt_attn = load_module("embed_gpt_attn", EMBED_DIR / "gpt_new_attn_matrix.py")
 svd_gpt_attn = load_module("svd_gpt_attn", SVD_DIR / "gpt_new_attn_matrix.py")
@@ -131,7 +131,7 @@ def evaluate_model(dataloader, candidate_model, original_model, perplexity, devi
 
 if __name__ == "__main__":
     url = "distilgpt2"
-    root_checkpoint = ROOT / "auto_encoder.pth"
+    root_checkpoint = ROOT / "unet_original" / "auto_encoder.pth"
     embed_checkpoint = EMBED_DIR / "embedding_auto_model.pth"
     svd_rank = 128
 

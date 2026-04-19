@@ -6,23 +6,25 @@ import torch.nn.functional as F
 class TruncatedSVDQ(nn.Module):
     def __init__(self, q_weight, rank=128):
         super().__init__()
-        max_rank = min(q_weight.shape)
+        rows, cols = q_weight.shape
+        max_rank = min(rows, cols)
         if rank < 1 or rank > max_rank:
             raise ValueError(f"rank must be in [1, {max_rank}], got {rank}")
 
         with torch.no_grad():
-            u, s, vh = torch.linalg.svd(q_weight.detach().to(torch.float32), full_matrices=False)
-            u_r = u[:, :rank]
-            s_r = s[:rank]
-            vh_r = vh[:rank, :]
-
-            left = u_r * s_r.unsqueeze(0)
-            right = vh_r
+            q_weight = q_weight.detach().to(torch.float32)
+            u, s, vh = torch.linalg.svd(q_weight, full_matrices=True)
 
         self.rank = rank
-        self.register_buffer("left", left)
-        self.register_buffer("right", right)
+        self.register_buffer("u", u)
+        self.register_buffer("s", s)
+        self.register_buffer("vh", vh)
 
     def forward(self, x):
-        x = F.linear(x, self.right)
-        return F.linear(x, self.left)
+        u_r = self.u[:, : self.rank]
+        s_r = self.s[: self.rank]
+        vh_r = self.vh[: self.rank, :]
+
+        x = F.linear(x, vh_r)
+        x = x * s_r
+        return F.linear(x, u_r)
