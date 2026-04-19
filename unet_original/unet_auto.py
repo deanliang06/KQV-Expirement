@@ -7,11 +7,12 @@ from torchvision.transforms.functional import crop
 class CNNBasedFrag(nn.Module):
     def __init__(self, autoencoder, params, ndim=768, d=64):
         super().__init__()
-        self.d = d
+        self.d = d 
         self.autoencoder = autoencoder
         self.down = nn.Linear(ndim, d)
         self.down_ll = nn.LayerNorm(d)
         self.up = nn.Linear(d, ndim)
+        self.up_ll = nn.LayerNorm(ndim)
         
         self.register_buffer("base_weights", params["weights"].detach().to(next(autoencoder.parameters()).device))
         self.register_buffer("base_bias", params["bias"].detach().to(next(autoencoder.parameters()).device))
@@ -22,7 +23,7 @@ class CNNBasedFrag(nn.Module):
     def forward(self, x):
         x = self.down_ll(self.down(x))
         x = F.linear(x, self.autoencoder(self.base_weights))
-        x = self.up(x) + self.base_bias
+        x = self.up_ll(self.up(x)) + self.base_bias
         return x
 
 class CNNAutoencoder(nn.Module):

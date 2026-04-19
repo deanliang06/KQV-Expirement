@@ -2,7 +2,7 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM, DataCollatorForLanguageModeling
-from unet_auto import CNNAutoencoder
+from unet_original.unet_auto import CNNAutoencoder
 import os
 import sys
 

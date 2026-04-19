@@ -54,7 +54,7 @@ lr=3e-5
 - KL-Div Loss: 1.1464806598775528
 
 
-Unet with distilGPT-2
+Unet with distilGPT-2 (10 epochs)
 Average Perplexity: 3148.377924321774
 MSE Loss: 23.93071746826172
 Cos Sim: 0.9973875254720121
