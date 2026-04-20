@@ -14,12 +14,22 @@ class GPTAttn(nn.Module):
         self.q_bias, self.k_bias, self.v_bias = torch.chunk(self.base_bias, 3)
 
         self.autoencoder = autoencoder
+        self._cached_q_weight = None
 
     def set_autoencoder(self, autoencoder):
         self.autoencoder = autoencoder
+        self._cached_q_weight = None
+
+    def reconstruct_q(self):
+        q_weight = self.autoencoder(self.q)
+        self._cached_q_weight = q_weight
+        return q_weight
+
+    def clear_cache(self):
+        self._cached_q_weight = None
 
     def forward(self, x):
-        q_weight = self.autoencoder(self.q)
+        q_weight = self.reconstruct_q()
         qx = F.linear(x, q_weight, self.q_bias)
         kx = F.linear(x, self.k, self.k_bias)
         vx = F.linear(x, self.v, self.v_bias)

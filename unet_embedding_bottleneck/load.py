@@ -7,7 +7,6 @@ from datasets import load_dataset
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchmetrics.text import Perplexity
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
 if __package__ in (None, ""):
@@ -41,7 +40,9 @@ def matrix_l2_loss(model):
         if not isinstance(wrapped_attn, GPTAttn):
             continue
 
-        recon_q = wrapped_attn.autoencoder(wrapped_attn.q)
+        recon_q = wrapped_attn._cached_q_weight
+        if recon_q is None:
+            recon_q = wrapped_attn.reconstruct_q()
         total = total + (recon_q - wrapped_attn.q).pow(2).mean()
         wrapped_layers += 1
 
@@ -49,6 +50,13 @@ def matrix_l2_loss(model):
         raise RuntimeError("No embedding bottleneck GPTAttn wrappers found")
 
     return total / wrapped_layers
+
+
+def clear_q_weight_caches(model):
+    for layer in model.transformer.h:
+        wrapped_attn = layer.attn.c_attn
+        if isinstance(wrapped_attn, GPTAttn):
+            wrapped_attn.clear_cache()
 
 
 def token_cross_entropy_loss(logits, targets, ignore_index):
@@ -94,12 +102,11 @@ def move_batch_to_device(batch, device):
     return batch
 
 
-def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity, device):
+def test(dataloader, autoencoder_model, original_model, epoch_num, device):
     total_loss = 0
     total_matrix_l2 = 0
     total_token_ce = 0
-    cos_sim = 0
-    total_perplexity = 0
+    total_mse = 0
 
     with torch.no_grad():
         for x in dataloader:
@@ -110,48 +117,43 @@ def test(dataloader, autoencoder_model, original_model, epoch_num, perplexity, d
                 pred = autoencoder_model(**x).logits[:, :-1, :]
                 target = x["input_ids"][:, 1:]
                 loss, matrix_l2, token_ce = combined_loss(autoencoder_model, pred, target, tok.pad_token_id)
+                mse = F.mse_loss(pred.float(), y.float())
 
-                if not torch.isfinite(loss):
+                if not torch.isfinite(loss) or not torch.isfinite(mse):
+                    clear_q_weight_caches(autoencoder_model)
                     continue
-
-            pscore = perplexity(preds=pred, target=target)
-            if not torch.isfinite(pscore):
-                continue
 
             total_loss += loss.detach()
             total_matrix_l2 += matrix_l2
             total_token_ce += token_ce
-            cos_sim += torch.nn.functional.cosine_similarity(pred, y, dim=-1).mean().item()
-            total_perplexity += pscore.item() / len(dataloader)
+            total_mse += mse.item()
+            clear_q_weight_caches(autoencoder_model)
 
     print(f"Epoch Test #{epoch_num}\n-----------------")
-    print(f"Average Perplexity: {total_perplexity}")
     print(f"Combined Loss: {total_loss / len(dataloader)}")
     print(f"Matrix L2: {total_matrix_l2 / len(dataloader)}")
     print(f"Token CE: {total_token_ce / len(dataloader)}")
-    print(f"Cos Sim: {cos_sim / len(dataloader)}")
+    print(f"MSE: {total_mse / len(dataloader)}")
 
 
-def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, epoch_num, scalar, perplexity, device):
+def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, epoch_num, scalar, device):
     total_loss = 0
     total_matrix_l2 = 0
     total_token_ce = 0
-    cos_sim = 0
-    total_perplexity = 0
+    total_mse = 0
     print(f"Num batches: {len(dataloader)}")
 
     for x in dataloader:
         x = move_batch_to_device(x, device)
 
         with torch.no_grad():
-            actual_y = original_model(**x).logits[:, :-1, :]
+            with autocast_context(device):
+                actual_y = original_model(**x).logits[:, :-1, :]
 
         with autocast_context(device):
             pred = autoencoder_model(**x).logits[:, :-1, :]
-
-        pred = pred.to(torch.float32)
-        target = x["input_ids"][:, 1:]
-        loss, matrix_l2, token_ce = combined_loss(autoencoder_model, pred, target, tok.pad_token_id)
+            target = x["input_ids"][:, 1:]
+            loss, matrix_l2, token_ce = combined_loss(autoencoder_model, pred, target, tok.pad_token_id)
         scalar.scale(loss).backward()
         scalar.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]["params"], 1.0)
@@ -159,6 +161,7 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
         if not torch.isfinite(grad_norm):
             optimizer.zero_grad(set_to_none=True)
             scalar.update()
+            clear_q_weight_caches(autoencoder_model)
             continue
 
         scalar.step(optimizer)
@@ -166,22 +169,21 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
         optimizer.zero_grad(set_to_none=True)
 
         with torch.no_grad():
-            pnum = perplexity(preds=pred, target=target)
-            if not torch.isfinite(pnum):
+            mse = F.mse_loss(pred.float(), actual_y.float())
+            if not torch.isfinite(mse):
+                clear_q_weight_caches(autoencoder_model)
                 continue
-
-            total_perplexity += pnum.item() / len(dataloader)
             total_matrix_l2 += matrix_l2
             total_token_ce += token_ce
-            cos_sim += torch.nn.functional.cosine_similarity(pred, actual_y, dim=-1).mean().item()
+            total_mse += mse.item()
             total_loss += loss.detach()
+        clear_q_weight_caches(autoencoder_model)
 
     print(f"Epoch Train #{epoch_num}\n-----------------")
-    print(f"Perplexity: {total_perplexity}")
     print(f"Combined Loss: {total_loss / len(dataloader)}")
     print(f"Matrix L2: {total_matrix_l2 / len(dataloader)}")
     print(f"Token CE: {total_token_ce / len(dataloader)}")
-    print(f"Cos Sim: {cos_sim / len(dataloader)}")
+    print(f"MSE: {total_mse / len(dataloader)}")
 
 
 if __name__ == "__main__":
@@ -236,9 +238,8 @@ if __name__ == "__main__":
     attach_gpt_wrappers(changed_model, model, auto_encoder, device=device)
     optimizer = torch.optim.Adam(collect_trainable_params(auto_encoder), lr, weight_decay=wd)
     scalar = torch.amp.GradScaler(enabled=device.type == "cuda")
-    perplexity = Perplexity(ignore_index=tok.pad_token_id).to(device)
 
     for it in range(epochs):
-        train(data, changed_model, model, auto_encoder, optimizer, it + 1, scalar, perplexity, device)
-        test(t_data, changed_model, model, it + 1, perplexity, device)
+        train(data, changed_model, model, auto_encoder, optimizer, it + 1, scalar, device)
+        test(t_data, changed_model, model, it + 1, device)
         torch.save(auto_encoder.state_dict(), CHECKPOINT_PATH)

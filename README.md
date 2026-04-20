@@ -82,3 +82,29 @@ LAMBADA eval
 Original distilbert accurcy: 0.11419677734375
 Our represnetation model accurcy: 0.0008072853088378906
 Random initialization accurcy: 8e-5
+
+## DistilGPT-2 LAMBADA Comparison
+
+Latest `compare_q_experiments.py` results on the LAMBADA test split:
+
+### Original U-Net experiment
+
+- batches: 215
+- original_lambada_accuracy: 2.4224806923505873
+- candidate_lambada_accuracy: 0.0
+- mean_squared_error: 159.00672252566315
+
+### Embedding bottleneck U-Net experiment
+
+- batches: 215
+- original_lambada_accuracy: 2.6823986200399177
+- candidate_lambada_accuracy: 0.09689922769402348
+- mean_squared_error: 133.71105108926463
+
+### SVD baseline experiment (`rank=128`)
+
+- batches: 215
+- original_lambada_accuracy: 2.6823986200399177
+- candidate_lambada_accuracy: 0.0
+- mean_squared_error: 164.61711067377135
+
