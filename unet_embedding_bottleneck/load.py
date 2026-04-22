@@ -25,10 +25,25 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CHECKPOINT_PATH = SCRIPT_DIR / "embedding_auto_model.pth"
 MATRIX_L2_WEIGHT = 1.0
 TOKEN_CE_WEIGHT = 0.1
+MIN_SEQUENCE_LENGTH = 2
 
 
 def encode(example):
     return tok(example["text"])
+
+
+def has_min_tokens(example):
+    return len(example["input_ids"]) >= MIN_SEQUENCE_LENGTH
+
+
+def prepare_dataset(dataset, split_name):
+    tokenized = dataset.map(encode, batched=True, batch_size=1000, remove_columns=["text"])
+    original_size = len(tokenized)
+    tokenized = tokenized.filter(has_min_tokens)
+    removed = original_size - len(tokenized)
+    if removed:
+        print(f"Filtered {removed} {split_name} samples with fewer than {MIN_SEQUENCE_LENGTH} tokens")
+    return tokenized.with_format(type="torch")
 
 
 def matrix_l2_loss(model):
@@ -102,14 +117,21 @@ def move_batch_to_device(batch, device):
     return batch
 
 
+def has_shiftable_tokens(batch):
+    return batch["input_ids"].size(-1) >= MIN_SEQUENCE_LENGTH
+
+
 def test(dataloader, autoencoder_model, original_model, epoch_num, device):
     total_loss = 0
     total_matrix_l2 = 0
     total_token_ce = 0
     total_mse = 0
+    valid_batches = 0
 
     with torch.no_grad():
         for x in dataloader:
+            if not has_shiftable_tokens(x):
+                continue
             x = move_batch_to_device(x, device)
 
             with autocast_context(device):
@@ -127,13 +149,19 @@ def test(dataloader, autoencoder_model, original_model, epoch_num, device):
             total_matrix_l2 += matrix_l2
             total_token_ce += token_ce
             total_mse += mse.item()
+            valid_batches += 1
             clear_q_weight_caches(autoencoder_model)
 
+    if valid_batches == 0:
+        print(f"Epoch Test #{epoch_num}\n-----------------")
+        print("No valid batches were available for evaluation")
+        return
+
     print(f"Epoch Test #{epoch_num}\n-----------------")
-    print(f"Combined Loss: {total_loss / len(dataloader)}")
-    print(f"Matrix L2: {total_matrix_l2 / len(dataloader)}")
-    print(f"Token CE: {total_token_ce / len(dataloader)}")
-    print(f"MSE: {total_mse / len(dataloader)}")
+    print(f"Combined Loss: {total_loss / valid_batches}")
+    print(f"Matrix L2: {total_matrix_l2 / valid_batches}")
+    print(f"Token CE: {total_token_ce / valid_batches}")
+    print(f"MSE: {total_mse / valid_batches}")
 
 
 def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer, epoch_num, scalar, device):
@@ -141,9 +169,12 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
     total_matrix_l2 = 0
     total_token_ce = 0
     total_mse = 0
+    valid_batches = 0
     print(f"Num batches: {len(dataloader)}")
 
     for x in dataloader:
+        if not has_shiftable_tokens(x):
+            continue
         x = move_batch_to_device(x, device)
 
         with torch.no_grad():
@@ -177,13 +208,19 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
             total_token_ce += token_ce
             total_mse += mse.item()
             total_loss += loss.detach()
+            valid_batches += 1
         clear_q_weight_caches(autoencoder_model)
 
+    if valid_batches == 0:
+        print(f"Epoch Train #{epoch_num}\n-----------------")
+        print("No valid batches were available for training")
+        return
+
     print(f"Epoch Train #{epoch_num}\n-----------------")
-    print(f"Combined Loss: {total_loss / len(dataloader)}")
-    print(f"Matrix L2: {total_matrix_l2 / len(dataloader)}")
-    print(f"Token CE: {total_token_ce / len(dataloader)}")
-    print(f"MSE: {total_mse / len(dataloader)}")
+    print(f"Combined Loss: {total_loss / valid_batches}")
+    print(f"Matrix L2: {total_matrix_l2 / valid_batches}")
+    print(f"Token CE: {total_token_ce / valid_batches}")
+    print(f"MSE: {total_mse / valid_batches}")
 
 
 if __name__ == "__main__":
@@ -206,8 +243,8 @@ if __name__ == "__main__":
     data_collator = DataCollatorForLanguageModeling(tokenizer=tok, mlm=False, return_tensors="pt")
     model = AutoModelForCausalLM.from_pretrained(url).to(device).eval()
 
-    dataset = train_dataset.map(encode, batched=True, batch_size=1000, remove_columns=["text"]).with_format(type="torch")
-    t_dataset = test_dataset.map(encode, batched=True, batch_size=1000, remove_columns=["text"]).with_format(type="torch")
+    dataset = prepare_dataset(train_dataset, "train")
+    t_dataset = prepare_dataset(test_dataset, "test")
     data = DataLoader(
         dataset,
         batch_size=12,
