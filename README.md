@@ -104,7 +104,7 @@ Latest `compare_q_experiments.py` results on the LAMBADA test split:
 ### SVD baseline experiment (`rank=128`)
 
 - batches: 215
-- original_lambada_accuracy: 2.6823986200399177
-- candidate_lambada_accuracy: 0.0
-- mean_squared_error: 164.61711067377135
+- original distilgpt2 accuracy: 2.345703125
+- candidate_lambada accuracy: 1.5439453125
+- mean_squared_error: 14.836960815274438
 

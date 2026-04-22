@@ -189,7 +189,7 @@ def train(dataloader, autoencoder_model, original_model, autoencoder, optimizer,
 if __name__ == "__main__":
     lr = 3e-5
     wd = 0.002
-    epochs = 10
+    epochs = 75
     n_embed = 768
     embedding_dim = 128
 

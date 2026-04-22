@@ -29,6 +29,8 @@ class GPTAttn(nn.Module):
 
     def forward(self, x):
         qx = self.svd_q(x) + self.q_bias
-        kx = F.linear(x, self.k, self.k_bias)
-        vx = F.linear(x, self.v, self.v_bias)
+        # GPT-2 Conv1D stores weights as [in_features, out_features], but
+        # F.linear expects [out_features, in_features].
+        kx = F.linear(x, self.k.t(), self.k_bias)
+        vx = F.linear(x, self.v.t(), self.v_bias)
         return torch.cat((qx, kx, vx), dim=-1)

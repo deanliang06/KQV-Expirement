@@ -25,6 +25,5 @@ class TruncatedSVDQ(nn.Module):
         s_r = self.s[: self.rank]
         vh_r = self.vh[: self.rank, :]
 
-        x = F.linear(x, vh_r)
-        x = x * s_r
-        return F.linear(x, u_r)
+        q_hat = (u_r * s_r) @ vh_r
+        return F.linear(x, q_hat.t())
